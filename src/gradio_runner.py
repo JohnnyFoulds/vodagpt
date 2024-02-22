@@ -882,8 +882,8 @@ def go_gradio(**kwargs):
             if description is None:
                 description = ''
             gr.Markdown(f"""
-                {get_h2o_title(title, description, visible_h2ogpt_qrcode=kwargs['visible_h2ogpt_qrcode'])
-            if kwargs['h2ocolors'] else get_simple_title(title, description)}
+                {get_h2o_title(page_title, description, visible_h2ogpt_qrcode=kwargs['visible_h2ogpt_qrcode'])
+            if kwargs['h2ocolors'] else get_simple_title(page_title, description)}
                 """)
 
         # go button visible if
