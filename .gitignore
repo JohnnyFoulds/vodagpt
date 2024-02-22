@@ -1,4 +1,9 @@
 *.gguf
+sources_dir/
+users/
+auth.json*
+
+#--- original ---
 out/
 7B/
 13B/

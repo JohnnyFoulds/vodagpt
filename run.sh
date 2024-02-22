@@ -10,7 +10,9 @@ python generate.py \
   --base_model=TheBloke/zephyr-7B-beta-GGUF \
   --prompt_type=zephyr \
   --max_seq_len=4096 \
-  --langchain_mode=UserData \
+  --langchain_mode=MyData \
+  --allow_upload_to_user_data=False \
+  --allow_upload_to_my_data=True \
   --h2ocolors=False \
   --enable_stt=False \
   --enable_tts=False \
