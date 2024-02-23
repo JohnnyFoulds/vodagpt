@@ -6,7 +6,7 @@ python generate.py \
   --auth_filename=auth.json \
   --enforce_h2ogpt_api_key=True \
   --enforce_h2ogpt_ui_key=True \
-  --h2ogpt_api_keys="['501ACE']" \
+  --h2ogpt_api_keys="['501ACE', 'b3sty']" \
   --base_model=TheBloke/zephyr-7B-beta-GGUF \
   --prompt_type=zephyr \
   --max_seq_len=4096 \
