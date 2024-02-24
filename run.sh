@@ -13,6 +13,7 @@ python generate.py \
   --langchain_mode=MyData \
   --allow_upload_to_user_data=False \
   --allow_upload_to_my_data=True \
+  --pre_load_embedding_model=True \
   --h2ocolors=False \
   --enable_stt=False \
   --enable_tts=False \
