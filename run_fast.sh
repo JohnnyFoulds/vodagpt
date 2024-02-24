@@ -1,0 +1,24 @@
+#!/bin/bash
+
+export ADMIN_PASS=vodacomdoesllm
+
+python generate.py \
+  --auth_filename=auth.json \
+  --enforce_h2ogpt_api_key=True \
+  --enforce_h2ogpt_ui_key=True \
+  --h2ogpt_api_keys="['501ACE', 'b3sty']" \
+  --base_model=HuggingFaceH4/zephyr-7b-beta \
+  --prompt_type=zephyr \
+  --load_4bit=True \
+  --max_seq_len=4096 \
+  --langchain_mode=MyData \
+  --allow_upload_to_user_data=False \
+  --allow_upload_to_my_data=True \
+  --pre_load_embedding_model=True \
+  --h2ocolors=False \
+  --enable_stt=False \
+  --enable_tts=False \
+  --visible_expert_tab=False \
+  --visible_models_tab=False \
+  --visible_h2ogpt_links=False \
+  --page_title="vodaGPT"

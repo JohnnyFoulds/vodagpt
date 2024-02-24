@@ -2,6 +2,7 @@
 sources_dir/
 users/
 auth.json*
+llamacpp_path/
 
 #--- original ---
 out/
