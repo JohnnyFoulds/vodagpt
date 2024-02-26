@@ -67,6 +67,24 @@ def get_client():
         client = get_gradio_client()
     return client
 
+def perform_login(client, kwargs):
+    """
+    Perform a login if a username, password, and langchain_mode was provided
+    in the following format: "username:passwprd:lanchain_mode"
+    """
+    user = kwargs['user']
+    if user:
+        args = user.split(':')
+        # only attempt to login if a langchain_mode was provided
+        if len(args) == 3:
+            langchain_mode = args[2]
+
+            # perform login
+            client.predict(langchain_mode, args[0], args[1], None, None, api_name='/login')
+
+            # add the langchain mode to the kwargs
+            kwargs['langchain_mode'] = langchain_mode
+
 
 def get_response(instruction, gen_kwargs, verbose=False, chunk_response=True, stream_output=False):
     import ast
@@ -101,6 +119,9 @@ def get_response(instruction, gen_kwargs, verbose=False, chunk_response=True, st
 
     # concurrent gradio client
     client = get_client()
+
+    # perform login if required
+    perform_login(client, kwargs)
 
     if stream_output:
         job = client.submit(str(dict(kwargs)), api_name='/submit_nochat_api')
