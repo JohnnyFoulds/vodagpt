@@ -882,8 +882,8 @@ def go_gradio(**kwargs):
             if description is None:
                 description = ''
             gr.Markdown(f"""
-                {get_h2o_title(title, description, visible_h2ogpt_qrcode=kwargs['visible_h2ogpt_qrcode'])
-            if kwargs['h2ocolors'] else get_simple_title(title, description)}
+                {get_h2o_title(page_title, description, visible_h2ogpt_qrcode=kwargs['visible_h2ogpt_qrcode'])
+            if kwargs['h2ocolors'] else get_simple_title(page_title, description)}
                 """)
 
         # go button visible if
@@ -2907,7 +2907,8 @@ def go_gradio(**kwargs):
         eventdb_loginb = eventdb_logina.then(login_func,
                                              inputs=login_inputs,
                                              outputs=login_outputs,
-                                             queue=not kwargs['large_file_count_mode'])
+                                             queue=not kwargs['large_file_count_mode'],
+                                             api_name='login')
 
         admin_pass_textbox.submit(check_admin_pass, inputs=admin_pass_textbox, outputs=system_row,
                                   **noqueue_kwargs) \
@@ -3310,7 +3311,7 @@ def go_gradio(**kwargs):
                                      outputs=[my_db_state, selection_docs_state, langchain_mode,
                                               new_langchain_mode_text,
                                               langchain_mode_path_text],
-                                     api_name='new_langchain_mode_text' if allow_api and allow_upload_to_user_data else None)
+                                     api_name='new_langchain_mode_text' if allow_api and (allow_upload_to_user_data or allow_upload_to_my_data) else None)
         db_events.extend([eventdb20a, eventdb20b])
 
         remove_langchain_mode_func = functools.partial(remove_langchain_mode,
