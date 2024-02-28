@@ -1,10 +1,67 @@
 ## Frequently asked questions
 
+### Google Gemma
+
+```bash
+export HUGGING_FACE_HUB_TOKEN=<token so can access gemma after you have been approved>
+python generate.py --base_model=google/gemma-7b-it
+```
+If issues, try logging in via `huggingface-cli login` (run `git config --global credential.helper store` if in git repo).
+
+### Text Embedding Inference Server
+
+Using docker for [TEI](https://github.com/huggingface/text-embeddings-inference?tab=readme-ov-file#docker):
+```
+docker run -d --gpus '"device=0"' --shm-size 3g -v $HOME/.cache/huggingface/hub/:/data -p 5555:80 --pull always ghcr.io/huggingface/text-embeddings-inference:0.6 --model-id BAAI/bge-large-en-v1.5 --revision refs/pr/5 --hf-api-token=$HUGGING_FACE_HUB_TOKEN --max-client-batch-size=4096 --max-batch-tokens=2097152
+```
+where passing `--hf-api-token=$HUGGING_FACE_HUB_TOKEN` is only required if the model is private. Use [different tags](https://github.com/huggingface/text-embeddings-inference?tab=readme-ov-file#docker-images) for Turing, H100, or CPU etc.  Adjust `--max-batch-tokens` to smaller for smaller GPUs (e.g. back to default of 16384).  Note that client batch size times 512 must be smaller or equal to max batch tokens.
+
+Then for h2oGPT ensure pass:
+```bash
+--hf_embedding_model=tei:http://localhost:5555 --cut_distance=10000
+```
+or whatever address is required.
+
+This leads to much faster embedding generation as well as better memory leak avoidance due to [multi-threading and torch](https://github.com/pytorch/pytorch/issues/64412).
+
+To use the TEI directly, do the following for synchronous calls. Asynchronous calls also can be done.
+```python
+import json
+from huggingface_hub import InferenceClient
+
+
+def split_list(input_list, split_size):
+    for i in range(0, len(input_list), split_size):
+        yield input_list[i:i + split_size]
+
+
+def get_embeddings(texts):
+    model = "https://api.embed-internal.h2o.ai"
+    client = InferenceClient(
+        model=model,
+    )
+
+    max_tokens = 512  # to avoid sending long untokenized text for requests limit
+    max_batch_size = 1024  # for 2M request barrier
+
+    texts = [text.replace("\n", " ")[:4 * max_tokens] for text in texts]
+    texts_batches = split_list(texts, max_batch_size)
+    embedddings = []
+    for text_batch in texts_batches:
+        responses = client.post(json={"inputs": text_batch, "truncate": True, }, task="feature-extraction")
+        embedddings.extend(json.loads(responses.decode()))
+    return embedddings
+
+
+if __name__ == '__main__':
+    texts = ["Who are you?", "I am Dad"]
+
+    print(get_embeddings(texts))
+```
+
 ### Gradio clean-up of states
 
-While Streamlit handles [callbacks to state clean-up)[https://github.com/streamlit/streamlit/issues/6166], Gradio does [not](https://github.com/gradio-app/gradio/issues/4016) without h2oGPT-driven changes.  So if you want browser/tab closure to trigger clean-up, `https://h2o-release.s3.amazonaws.com/h2ogpt/gradio-4.19.1-py3-none-any.whl` is required instead of PyPi version.  This also helps if have many users using your app and want to ensure databases are cleaned up.
-
-To use, uncomment `https://h2o-release.s3.amazonaws.com/h2ogpt/gradio-4.19.1-py3-none-any.whl` in `requirements.txt`.
+While Streamlit handles [callbacks to state clean-up)[https://github.com/streamlit/streamlit/issues/6166], Gradio does [not](https://github.com/gradio-app/gradio/issues/4016) without h2oGPT-driven changes.  So if you want browser/tab closure to trigger clean-up, `https://h2o-release.s3.amazonaws.com/h2ogpt/gradio-4.19.2-py3-none-any.whl` is required instead of PyPi version.  This also helps if have many users using your app and want to ensure databases are cleaned up. By default h2oGPT uses this version of Gradio, but go to normal gradio if web sockets are an issue for your network/platform.
 
 This will clean up model states if use UI to load/unload models when not using `--base_model` on CLI like in windows, so don't have to worry about memory leaks when browser tab is closed.  It will also clean up Chroma database states.
 
@@ -482,6 +539,24 @@ As listed in the `src/gen.py` file, there are many ways to control authorization
 *   :param guest_name: guess name if using auth and have open access.
     * If '', then no guest allowed even if open access, then all databases for each user always persisted
 
+Example auth accesses are OPEN with guest allowed
+```
+python generate.py --auth_access=open --guest_name=guest --auth=auth.json
+```
+OPEN with no guest allowed:
+```
+python generate.py --auth_access=open --guest_name=guest --auth=auth.json --guest_name=''
+```
+CLOSED with no guest allowed
+```
+python generate.py --auth_access=closed --auth=auth.json --guest_name=''
+```
+No landing page authentication, but login possible inside app for Login tab:
+```
+python generate.py --auth_filename=auth.json
+```
+
+
 The file format for `auth.json` in basic form is:
 ```json
 {
@@ -545,6 +620,22 @@ while more generally it is updated by h2oGPT to contain other entries, for examp
     ]
   }
 ```
+
+Since Gradio 4.x, API access is possible when auth protected, e.g.
+```python
+from gradio_client import Client
+client = Client('http://localhost:7860', auth=('username', 'password'))
+```
+then use client as normal.
+
+If both auth and key is enabled, then do:
+```python
+from gradio_client import Client
+client = Client('http://localhost:7860', auth=('username', 'password'))
+res = client.predict(str(dict(instruction="Who are you?", h2ogpt_key='<h2ogpt_key')), api_name='/submit_nochat_plain_api')
+print(res)
+```
+or other API endpoints.
 
 ### HTTPS access for server and client
 

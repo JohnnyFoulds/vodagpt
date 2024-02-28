@@ -59,7 +59,7 @@ from utils import wrapped_partial, EThread, import_matplotlib, sanitize_filename
     get_list_or_str, have_pillow, only_selenium, only_playwright, only_unstructured_urls, get_short_name, \
     get_accordion, have_jq, get_doc, get_source, have_chromamigdb, get_token_count, reverse_ucurve_list, get_size, \
     get_test_name_core, download_simple, have_fiftyone, have_librosa, return_good_url, n_gpus_global, \
-    get_accordion_named, hyde_titles, have_cv2, FullSet, create_relative_symlink
+    get_accordion_named, hyde_titles, have_cv2, FullSet, create_relative_symlink, split_list
 from enums import DocumentSubset, no_lora_str, model_token_mapping, source_prefix, source_postfix, non_query_commands, \
     LangChainAction, LangChainMode, DocumentChoice, LangChainTypes, font_size, head_acc, super_source_prefix, \
     super_source_postfix, langchain_modes_intrinsic, get_langchain_prompts, LangChainAgent, docs_joiner_default, \
@@ -73,7 +73,7 @@ from prompter import non_hf_types, PromptType, Prompter, get_vllm_extra_dict, sy
     is_vision_model
 from src.serpapi import H2OSerpAPIWrapper
 from utils_langchain import StreamingGradioCallbackHandler, _chunk_sources, _add_meta, add_parser, fix_json_meta, \
-    load_general_summarization_chain
+    load_general_summarization_chain, H2OHuggingFaceHubEmbeddings
 
 import_matplotlib()
 
@@ -105,11 +105,6 @@ def get_context_cast():
     return NullContext()
 
 
-def split_list(input_list, split_size):
-    for i in range(0, len(input_list), split_size):
-        yield input_list[i:i + split_size]
-
-
 def get_db(sources, use_openai_embedding=False, db_type='faiss',
            persist_directory=None, load_db_if_exists=True,
            langchain_mode='notset',
@@ -119,7 +114,8 @@ def get_db(sources, use_openai_embedding=False, db_type='faiss',
            hf_embedding_model=None,
            migrate_embedding_model=False,
            auto_migrate_db=False,
-           n_jobs=-1):
+           n_jobs=-1,
+           verbose=False):
     if not sources:
         return None
     user_path = langchain_mode_paths.get(langchain_mode)
@@ -212,7 +208,8 @@ def get_db(sources, use_openai_embedding=False, db_type='faiss',
             # doesn't check or change embedding, just saves it in case not saved yet, after persisting
             db, num_new_sources, new_sources_metadata = add_to_db(db, sources, db_type=db_type,
                                                                   use_openai_embedding=use_openai_embedding,
-                                                                  hf_embedding_model=hf_embedding_model)
+                                                                  hf_embedding_model=hf_embedding_model,
+                                                                  verbose=verbose)
     else:
         raise RuntimeError("No such db_type=%s" % db_type)
 
@@ -236,7 +233,7 @@ def _get_unique_sources_in_weaviate(db):
 
 def del_from_db(db, sources, db_type=None):
     if hasattr(db, '_persist_directory'):
-        print("Existing db, adding to %s" % db._persist_directory, flush=True)
+        print("Existing db, using %s" % db._persist_directory, flush=True)
         # chroma only
         lock_file = get_db_lock_file(db)
         context = filelock.FileLock
@@ -274,13 +271,20 @@ def add_to_db(db, sources, db_type='faiss',
               avoid_dup_by_file=False,
               avoid_dup_by_content=True,
               use_openai_embedding=False,
-              hf_embedding_model=None):
+              hf_embedding_model=None,
+              verbose=False):
     assert hf_embedding_model is not None
     num_new_sources = len(sources)
     if not sources:
         return db, num_new_sources, []
+
+    # don't do too large a batch so uses reasonable amount of memory
+    max_max_batch_size = int(os.getenv('CHROMA_MAX_BATCH_SIZE', '4096'))
+
     if db_type == 'faiss':
-        db.add_documents(sources)
+        sources_batches = split_list(sources, max_max_batch_size)
+        for sources_batch in sources_batches:
+            db.add_documents(documents=sources_batch)
     elif db_type == 'weaviate':
         # FIXME: only control by file name, not hash yet
         if avoid_dup_by_file or avoid_dup_by_content:
@@ -289,7 +293,9 @@ def add_to_db(db, sources, db_type='faiss',
         num_new_sources = len(sources)
         if num_new_sources == 0:
             return db, num_new_sources, []
-        db.add_documents(documents=sources)
+        sources_batches = split_list(sources, max_max_batch_size)
+        for sources_batch in sources_batches:
+            db.add_documents(documents=sources_batch)
     elif db_type in ['chroma', 'chroma_old']:
         collection = get_documents(db)
         # files we already have:
@@ -341,7 +347,11 @@ def add_to_db(db, sources, db_type='faiss',
             elif hasattr(api, '_producer') and hasattr(api._producer, 'max_batch_size'):
                 max_batch_size = api._producer.max_batch_size
             else:
+                # be conservative if not set
                 max_batch_size = int(os.getenv('CHROMA_MAX_BATCH_SIZE', '100'))
+            max_batch_size = min(max_batch_size, max_max_batch_size)
+            if verbose:
+                print("max_batch_size=%s" % max_batch_size, flush=True)
             sources_batches = split_list(sources, max_batch_size)
             for sources_batch in sources_batches:
                 db.add_documents(documents=sources_batch)
@@ -405,7 +415,9 @@ def create_or_update_db(db_type, persist_directory, collection_name,
                 hf_embedding_model=hf_embedding_model,
                 migrate_embedding_model=migrate_embedding_model,
                 auto_migrate_db=auto_migrate_db,
-                n_jobs=n_jobs)
+                n_jobs=n_jobs,
+                verbose=verbose,
+                )
 
     return db
 
@@ -447,33 +459,41 @@ def get_embedding(use_openai_embedding, hf_embedding_model=None, preload=False, 
         else:
             # object
             return hf_embedding_model
-        # to ensure can fork without deadlock
-        from langchain.embeddings import HuggingFaceEmbeddings
 
-        if isinstance(gpu_id, int) or gpu_id == 'auto':
-            device, torch_dtype, context_class = get_device_dtype()
-            model_kwargs = dict(device=device)
+        if hf_embedding_model.startswith('tei:'):
+            from langchain_community.embeddings import HuggingFaceHubEmbeddings
+            name = 'tei:'.join(hf_embedding_model.split('tei:')[1:])
+            embedding = H2OHuggingFaceHubEmbeddings(model=name,
+                                                    huggingfacehub_api_token=os.environ.get("HUGGINGFACEHUB_API_TOKEN"),
+                                                    model_kwargs={"truncate": True})
         else:
-            # use gpu_id as device name
-            model_kwargs = dict(device=gpu_id)
-        if 'instructor' in hf_embedding_model:
-            encode_kwargs = {'normalize_embeddings': True}
-            embedding = HuggingFaceInstructEmbeddings(model_name=hf_embedding_model,
-                                                      model_kwargs=model_kwargs,
-                                                      encode_kwargs=encode_kwargs)
-            embedding.client.eval()
-        else:
-            embedding = HuggingFaceEmbeddings(model_name=hf_embedding_model, model_kwargs=model_kwargs)
-            embedding.client.eval()
-        if gpu_id == 'auto':
-            gpu_id = 0
-        if preload and \
-                isinstance(gpu_id, int) and \
-                gpu_id >= 0 and \
-                hasattr(embedding.client, 'to') and \
-                get_device() == 'cuda':
-            embedding.client = embedding.client.to('cuda:%d' % gpu_id)
-        embedding.client.preload = preload
+            # to ensure can fork without deadlock
+            from langchain.embeddings import HuggingFaceEmbeddings
+
+            if isinstance(gpu_id, int) or gpu_id == 'auto':
+                device, torch_dtype, context_class = get_device_dtype()
+                model_kwargs = dict(device=device)
+            else:
+                # use gpu_id as device name
+                model_kwargs = dict(device=gpu_id)
+            if 'instructor' in hf_embedding_model:
+                encode_kwargs = {'normalize_embeddings': True}
+                embedding = HuggingFaceInstructEmbeddings(model_name=hf_embedding_model,
+                                                          model_kwargs=model_kwargs,
+                                                          encode_kwargs=encode_kwargs)
+                embedding.client.eval()
+            else:
+                embedding = HuggingFaceEmbeddings(model_name=hf_embedding_model, model_kwargs=model_kwargs)
+                embedding.client.eval()
+            if gpu_id == 'auto':
+                gpu_id = 0
+            if preload and \
+                    isinstance(gpu_id, int) and \
+                    gpu_id >= 0 and \
+                    hasattr(embedding.client, 'to') and \
+                    get_device() == 'cuda':
+                embedding.client = embedding.client.to('cuda:%d' % gpu_id)
+            embedding.client.preload = preload
     return embedding
 
 
@@ -1277,9 +1297,9 @@ class H2OOpenAI(OpenAI):
         # like super() OpenAI version but added limit
         num_tokens = self.get_num_tokens(prompt)
         if self.max_new_tokens0 is not None:
-            return min(self.max_new_tokens0, self.tokenizer.model_max_length - num_tokens)
+            return max(128, min(self.max_new_tokens0, self.tokenizer.model_max_length - num_tokens))
         else:
-            return self.max_context_size - num_tokens
+            return max(128, self.max_context_size - num_tokens)
 
     def count_out_tokens(self, rets):
         try:
@@ -1777,6 +1797,7 @@ def get_llm(use_openai_model=False,
             regenerate_clients=None,
             regenerate_gradio_clients=None,
             langchain_only_model=None,
+            load_awq='',
             stream_output=False,
             async_output=True,
             num_async=3,
@@ -1925,6 +1946,13 @@ def get_llm(use_openai_model=False,
                 inf_type, deployment_type, base_url, api_version, api_key = \
                 set_openai(inference_server, model_name=model_name)
 
+        if inf_type in ['vllm_chat', 'openai_chat', 'openai_azure_chat']:
+            openai_client_completions = openai_client.chat.completions
+            openai_async_client_completions = openai_async_client.chat.completions
+        else:
+            openai_client_completions = openai_client.completions
+            openai_async_client_completions = openai_async_client.completions
+
         # Langchain oddly passes some things directly and rest via model_kwargs
         model_kwargs = dict(top_p=top_p if do_sample else 1,
                             frequency_penalty=0,
@@ -1956,8 +1984,8 @@ def get_llm(use_openai_model=False,
                 kwargs_extra.update(dict(tokenizer=tokenizer,
                                          openai_api_key=api_key,
                                          # batch_size=1,
-                                         client=openai_client,
-                                         async_client=openai_async_client,
+                                         client=openai_client_completions,
+                                         async_client=openai_async_client_completions,
                                          # async_sem=async_sem,
                                          ))
         elif inf_type == 'openai_azure_chat':
@@ -1993,8 +2021,8 @@ def get_llm(use_openai_model=False,
                                          openai_api_base=base_url,
                                          openai_api_key=api_key,
                                          batch_size=1,  # https://github.com/h2oai/h2ogpt/issues/928
-                                         client=openai_client,
-                                         async_client=openai_async_client,
+                                         client=openai_client_completions,
+                                         async_client=openai_async_client_completions,
                                          async_sem=async_sem,
                                          max_new_tokens0=max_new_tokens0,
                                          ))
@@ -2422,7 +2450,9 @@ def get_llm(use_openai_model=False,
             streamer = None
 
         from h2oai_pipeline import H2OTextGenerationPipeline
-        if 'AWQ' in str(model) and hasattr(model, 'model'):
+
+        if load_awq and hasattr(model, 'model'):
+            # need this else get device on multiple devices cuda and cpu
             # e.g. AutoAWQForCausalLM
             model = model.model
         pipe = H2OTextGenerationPipeline(model=model,
@@ -4233,7 +4263,8 @@ def check_update_chroma_embedding(db,
                                   use_openai_embedding,
                                   hf_embedding_model, migrate_embedding_model, auto_migrate_db,
                                   langchain_mode, langchain_mode_paths, langchain_mode_types,
-                                  n_jobs=-1):
+                                  n_jobs=-1,
+                                  verbose=False):
     changed_db = False
     embed_tuple = load_embed(db=db, use_openai_embedding=use_openai_embedding)
 
@@ -4263,6 +4294,7 @@ def check_update_chroma_embedding(db,
                     migrate_embedding_model=migrate_embedding_model,
                     auto_migrate_db=auto_migrate_db,
                     n_jobs=n_jobs,
+                    verbose=verbose,
                     )
         changed_db = True
         print("Done updating db for new embedding: %s" % langchain_mode, flush=True)
@@ -4423,7 +4455,8 @@ def get_existing_db(db, persist_directory,
                                                                  langchain_mode,
                                                                  langchain_mode_paths,
                                                                  langchain_mode_types,
-                                                                 n_jobs=n_jobs)
+                                                                 n_jobs=n_jobs,
+                                                                 verbose=verbose)
             if changed_db:
                 db = db_trial
                 # only call persist if really changed db, else takes too long for large db
@@ -4573,6 +4606,7 @@ def get_persist_directory(langchain_mode, langchain_type=None, db1s=None, dbs=No
 
     # deal with existing locations
     user_base_dir = os.getenv('USERS_BASE_DIR', 'users')
+    makedirs(user_base_dir)
     persist_directory = os.path.join(user_base_dir, dirid, 'db_dir_%s' % langchain_mode)
     if userid and \
             (os.path.isdir(persist_directory) or
@@ -4815,7 +4849,8 @@ def _make_db(use_openai_embedding=False,
                         hf_embedding_model=hf_embedding_model,
                         migrate_embedding_model=migrate_embedding_model,
                         auto_migrate_db=auto_migrate_db,
-                        n_jobs=n_jobs)
+                        n_jobs=n_jobs,
+                        verbose=verbose)
             if verbose:
                 print("Generated db", flush=True)
         elif langchain_mode not in langchain_modes_intrinsic:
@@ -4825,7 +4860,8 @@ def _make_db(use_openai_embedding=False,
         print("Existing db, potentially adding %s sources from user_path=%s" % (len(sources), user_path), flush=True)
         db, num_new_sources, new_sources_metadata = add_to_db(db, sources, db_type=db_type,
                                                               use_openai_embedding=use_openai_embedding,
-                                                              hf_embedding_model=hf_embedding_model)
+                                                              hf_embedding_model=hf_embedding_model,
+                                                              verbose=verbose)
         print("Existing db, added %s new sources from user_path=%s" % (num_new_sources, user_path), flush=True)
     else:
         new_sources_metadata = [x.metadata for x in sources]
@@ -5070,6 +5106,7 @@ def run_qa_db(**kwargs):
     kwargs['hf_model_dict'] = {}  # shouldn't be required unless from test using _run_qa_db
     kwargs['image_file'] = kwargs.get('image_file')
     kwargs['image_control'] = kwargs.get('image_control')
+    kwargs['load_awq'] = kwargs.get('load_awq', '')
     missing_kwargs = [x for x in func_names if x not in kwargs]
     assert not missing_kwargs, "Missing kwargs for run_qa_db: %s" % missing_kwargs
     # only keep actual used
@@ -5129,6 +5166,7 @@ def _run_qa_db(query=None,
                db_type=None,
                model_name=None, model=None, tokenizer=None, inference_server=None,
                langchain_only_model=False,
+               load_awq='',
                hf_embedding_model=None,
                migrate_embedding_model=False,
                auto_migrate_db=False,
@@ -5347,6 +5385,7 @@ Respond to prompt of Final Answer with your final well-structured%s answer to th
                       tokenizer=tokenizer,
                       inference_server=inference_server,
                       langchain_only_model=langchain_only_model,
+                      load_awq=load_awq,
                       stream_output=stream_output,
                       async_output=async_output,
                       num_async=num_async,
@@ -5565,6 +5604,14 @@ Respond to prompt of Final Answer with your final well-structured%s answer to th
     else:
         prompt = prompt_basic
     num_prompt_tokens = get_token_count(prompt, tokenizer)
+
+    # ensure to close client
+    # https://github.com/langchain-ai/langchain/issues/13509
+    if regenerate_clients and \
+            hasattr(llm, 'client') and \
+            hasattr(llm.client, '_client') and \
+            hasattr(llm.client._client, 'close'):
+        llm.client._client.close()
 
     if len(docs) == 0:
         # if no docs, then no sources to cite
@@ -7843,7 +7890,8 @@ def _update_user_db(file,
                 # then add
                 db, num_new_sources, new_sources_metadata = add_to_db(db1[0], sources, db_type=db_type,
                                                                       use_openai_embedding=use_openai_embedding,
-                                                                      hf_embedding_model=hf_embedding_model)
+                                                                      hf_embedding_model=hf_embedding_model,
+                                                                      verbose=verbose)
             else:
                 # in testing expect:
                 # assert len(db1) == length_db1() and db1[1] is None, "Bad MyData db: %s" % db1
@@ -7865,7 +7913,8 @@ def _update_user_db(file,
                             hf_embedding_model=hf_embedding_model,
                             migrate_embedding_model=migrate_embedding_model,
                             auto_migrate_db=auto_migrate_db,
-                            n_jobs=n_jobs)
+                            n_jobs=n_jobs,
+                            verbose=verbose)
             if db is not None:
                 db1[0] = db
             source_files_added = get_source_files(db=db1[0], exceptions=exceptions)
@@ -7886,7 +7935,8 @@ def _update_user_db(file,
                 # then add
                 db, num_new_sources, new_sources_metadata = add_to_db(dbs[langchain_mode], sources, db_type=db_type,
                                                                       use_openai_embedding=use_openai_embedding,
-                                                                      hf_embedding_model=hf_embedding_model)
+                                                                      hf_embedding_model=hf_embedding_model,
+                                                                      verbose=verbose)
             else:
                 # then create.  Or might just be that dbs is unfilled, then it will fill, then add
                 db = get_db(sources, use_openai_embedding=use_openai_embedding,
@@ -7898,7 +7948,8 @@ def _update_user_db(file,
                             hf_embedding_model=hf_embedding_model,
                             migrate_embedding_model=migrate_embedding_model,
                             auto_migrate_db=auto_migrate_db,
-                            n_jobs=n_jobs)
+                            n_jobs=n_jobs,
+                            verbose=verbose)
             dbs[langchain_mode] = db
             # NOTE we do not return db, because function call always same code path
             # return dbs[langchain_mode]

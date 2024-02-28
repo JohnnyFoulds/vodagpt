@@ -230,6 +230,7 @@ def main(
         trust_remote_code: Union[str, bool] = True,
         rope_scaling: dict = None,
         max_seq_len: int = None,
+        max_output_seq_len: int = None,
         offload_folder: str = "offline_folder",
 
         src_lang: str = "English",
@@ -327,7 +328,7 @@ def main(
         visible_all_prompter_models: bool = False,
         visible_curated_models: bool = True,
         actions_in_sidebar: bool = False,
-        document_choice_in_sidebar: bool = False,
+        document_choice_in_sidebar: bool = True,
         enable_add_models_to_list_ui: bool = False,
         max_raw_chunks: int = None,
         pdf_height: int = 800,
@@ -335,6 +336,8 @@ def main(
         add_disk_models_to_ui: bool = True,
         page_title: str = "h2oGPT",
         favicon_path: str = None,
+        visible_ratings: bool = False,
+        reviews_file: str = None,
 
         sanitize_user_prompt: bool = False,
         sanitize_bot_response: bool = False,
@@ -709,6 +712,7 @@ def main(
             e.g. python generate.py --rope_scaling="{'type':'linear','factor':4}" --base_model=lmsys/vicuna-13b-v1.5-16k --hf_embedding_model=sentence-transformers/all-MiniLM-L6-v2 --load_8bit=True --langchain_mode=UserData --user_path=user_path --prompt_type=vicuna11 --h2ocolors=False
            For exllama model: --rope_scaling="{'alpha_value':4}" .  This automatically scales max_seq_len for exllama
     :param max_seq_len: Manually set maximum sequence length for the LLM
+    :param max_output_seq_len: Manually set maximum output length for the LLM
     :param offload_folder: path for spilling model onto disk
     :param src_lang: source languages to include if doing translation (None = all)
     :param tgt_lang: target languages to include if doing translation (None = all)
@@ -889,6 +893,8 @@ def main(
     :param add_disk_models_to_ui: Whether to add HF cache models and llama.cpp models to UI
     :param page_title: Title of the web page, default is h2oGPT
     :param favicon_path: Path to favicon, default is h2oGPT favicon
+    :param visible_ratings: Whether full review is visible, else just likable chatbots
+    :param reviews_file: File to store reviews, set to `reviews.csv` if visible_ratings=True if this isn't set
 
     :param sanitize_user_prompt: whether to remove profanity from user input (slows down input processing)
       Requires optional packages:
@@ -1362,6 +1368,10 @@ def main(
         auth_filename = "auth.json"
     assert isinstance(auth, (str, list, tuple, type(None))), "Unknown type %s for auth=%s" % (type(auth), auth)
 
+    if auth_access == 'closed':
+        # ensure, but should be protected inside anyways
+        guest_name = ''
+
     h2ogpt_pid = os.getpid() if close_button and not is_public else None
 
     # allow set token directly
@@ -1547,7 +1557,7 @@ def main(
     api_open = bool(int(os.getenv('API_OPEN', str(int(api_open)))))
     allow_api = bool(int(os.getenv('ALLOW_API', str(int(allow_api)))))
 
-    if openai_server and (not allow_api or auth_access == 'closed'):
+    if openai_server and not allow_api:
         print("Cannot enable OpenAI server when allow_api=False or auth is closed")
         openai_server = False
 
@@ -1688,6 +1698,7 @@ def main(
         pdf_loaders_options0, pdf_loaders_options, \
         url_loaders_options0, url_loaders_options = lg_to_gr(**locals())
     jq_schema0 = jq_schema
+    extract_frames0 = extract_frames
     # transcribe
     image_audio_loaders = image_audio_loaders_options0
     pdf_loaders = pdf_loaders_options0
@@ -1960,6 +1971,7 @@ def main(
                                       llamacpp_dict=llamacpp_dict,
                                       rope_scaling=rope_scaling,
                                       max_seq_len=max_seq_len,
+                                      max_output_seq_len=max_output_seq_len,
                                       exllama_dict=exllama_dict,
                                       gptq_dict=gptq_dict,
                                       attention_sinks=attention_sinks,
@@ -2214,7 +2226,8 @@ def get_config(base_model,
             if base_model in anthropic_gpts + openai_gpts + google_gpts + mistralai_gpts + non_hf_types:
                 return None, None, max_seq_len
             if 'not a local folder and is not a valid model identifier listed on' in str(
-                    e) or '404 Client Error' in str(e) or "couldn't connect" in str(e):
+                    e) or '404 Client Error' in str(e) or "couldn't connect" in str(e) or \
+                    'OSError: You are trying to access a gated repo.' in str(e):
                 # e.g. llama, gpjt, etc.
                 # e.g. HF TGI but not model on HF or private etc.
                 if max_seq_len is None and base_model.lower() in non_hf_types:
@@ -2378,6 +2391,9 @@ def get_non_lora_model(base_model, model_loader, load_half,
             **model_kwargs,
         )
     elif load_in_8bit or load_in_4bit or not load_half:
+        if model_kwargs.get('quantization_config'):
+            model_kwargs.pop('load_in_8bit', None)
+            model_kwargs.pop('load_in_4bit', None)
         model = model_loader(
             base_model,
             config=config,
@@ -2502,6 +2518,7 @@ def get_model(
         offload_folder: str = None,
         rope_scaling: dict = None,
         max_seq_len: int = None,
+        max_output_seq_len: int = None,
         compile_model: bool = False,
         llamacpp_path=None,
         llamacpp_dict=None,
@@ -2541,7 +2558,7 @@ def get_model(
     :param offload_folder: offload folder
     :param rope_scaling: scaling for rope-based models, e.g. "{'type':'dynamic', 'factor':4}"
     :param max_seq_len: override for maximum sequence length for model
-    :param max_seq_len: if set, use as max_seq_len for model
+    :param max_output_seq_len:
     :param compile_model: whether to compile torch model
     :param llamacpp_path: Path to download llama.cpp and GPT4All models to
     :param llamacpp_dict: dict of llama.cpp and GPT4All model options
@@ -2709,6 +2726,10 @@ def get_model(
                 if len(name_split) >= 2:
                     name = name_split[1]
                     models.append(name)
+                    if name not in google_mapping:
+                        if os.getenv('HARD_ASSERTS'):
+                            raise ValueError("%s not in google_mapping" % name)
+                        google_mapping[name] = 8192 # estimate
                     see_model |= base_model == name
         assert see_model, "Did not find model=%s in API access: %s" % (base_model, models)
 
@@ -2739,6 +2760,10 @@ def get_model(
         list_models = [x.id for x in dict(list_models_response)['data']]
         for name in list_models:
             see_model |= base_model == name
+            if name not in mistralai_mapping:
+                if os.getenv('HARD_ASSERTS'):
+                    raise ValueError("%s not in mistralai_mapping" % name)
+                mistralai_mapping[name] = 31768  # estimate
         assert see_model, "Did not find model=%s in API access: %s" % (base_model, models)
 
         async_client = MistralAsyncClient(api_key=api_key)
@@ -2751,9 +2776,13 @@ def get_model(
             print("Duration client %s: %s" % (base_model, time.time() - t0), flush=True)
 
     if inf_server_for_max_seq_len_handling or \
+            inference_server.startswith('openai') or \
             base_model in openai_gpts or \
+            inference_server.startswith('anthropic') or \
             base_model in anthropic_gpts or \
+            inference_server.startswith('google') or \
             base_model in google_gpts or \
+            inference_server.startswith('mistralai') or \
             base_model in mistralai_gpts:
         max_output_len = None
         if inference_server.startswith('openai') or base_model in openai_gpts:
@@ -2770,7 +2799,11 @@ def get_model(
             if base_model in model_token_mapping_outputs:
                 max_output_len = model_token_mapping_outputs[base_model]
             else:
-                max_output_len = None
+                if os.getenv('HARD_ASSERTS'):
+                    assert max_output_seq_len is not None, "Must set max_output_seq_len"
+                else:
+                    max_output_seq_len = 8192  # estimate
+                max_output_len = max_output_seq_len
         if inference_server.startswith('anthropic') or base_model in anthropic_gpts:
             if inference_server.startswith('anthropic'):
                 assert os.getenv('ANTHROPIC_API_KEY'), "Set environment for ANTHROPIC_API_KEY"
@@ -2783,7 +2816,11 @@ def get_model(
             if base_model in anthropic_mapping_outputs:
                 max_output_len = anthropic_mapping_outputs[base_model]
             else:
-                max_output_len = None
+                if os.getenv('HARD_ASSERTS'):
+                    assert max_output_seq_len is not None, "Must set max_output_seq_len"
+                else:
+                    max_output_seq_len = 4096  # estimate
+                max_output_len = max_output_seq_len
         if inference_server.startswith('google') or base_model in google_gpts:
             if inference_server.startswith('google'):
                 assert os.getenv('GOOGLE_API_KEY'), "Set environment for GOOGLE_API_KEY"
@@ -2796,7 +2833,11 @@ def get_model(
             if base_model in google_mapping_outputs:
                 max_output_len = google_mapping_outputs[base_model]
             else:
-                max_output_len = None
+                if os.getenv('HARD_ASSERTS'):
+                    assert max_output_seq_len is not None, "Must set max_output_seq_len"
+                else:
+                    max_output_seq_len = 8192  # estimate
+                max_output_len = max_output_seq_len
         if inference_server.startswith('mistralai') or base_model in mistralai_gpts:
             if inference_server.startswith('mistralai'):
                 assert os.getenv('MISTRAL_API_KEY'), "Set environment for MISTRAL_API_KEY"
@@ -2809,7 +2850,11 @@ def get_model(
             if base_model in mistralai_mapping_outputs:
                 max_output_len = mistralai_mapping_outputs[base_model]
             else:
-                max_output_len = None
+                if os.getenv('HARD_ASSERTS'):
+                    assert max_output_seq_len is not None, "Must set max_output_seq_len"
+                else:
+                    max_output_seq_len = 31768  # estimate
+                max_output_len = max_output_seq_len
         if inference_server.startswith('replicate'):
             assert len(inference_server.split(':')) >= 3, "Expected replicate:model string, got %s" % inference_server
             assert os.getenv('REPLICATE_API_TOKEN'), "Set environment for REPLICATE_API_TOKEN"
@@ -2854,6 +2899,9 @@ def get_model(
             model = inference_server
 
         return model, tokenizer, inference_server
+
+    if max_output_seq_len is not None:
+        tokenizer.max_output_len = max_output_seq_len
 
     if inference_server and base_model in non_hf_types and tokenizer is None:
         assert max_seq_len is not None, "Please pass --max_seq_len=<max_seq_len> for non-HF model %s" % base_model
@@ -3031,7 +3079,13 @@ def get_hf_model(load_8bit: bool = False,
         n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
         n_gpus, gpu_ids = cuda_vis_check(n_gpus)
         if n_gpus != 0 and not load_gptq:
-            if low_bit_mode == 1:
+            if load_8bit:
+                from transformers import BitsAndBytesConfig
+                model_kwargs['quantization_config'] = BitsAndBytesConfig(
+                                                                         load_in_8bit=load_8bit,
+                                                                         )
+
+            elif low_bit_mode == 1:
                 from transformers import BitsAndBytesConfig
                 model_kwargs['quantization_config'] = BitsAndBytesConfig(bnb_4bit_compute_dtype=torch.bfloat16,
                                                                          load_in_4bit=load_4bit,
@@ -3056,6 +3110,9 @@ def get_hf_model(load_8bit: bool = False,
                                                                          load_in_4bit=load_4bit,
                                                                          load_in_8bit=load_8bit,
                                                                          )
+        if model_kwargs.get('quantization_config'):
+            model_kwargs.pop('load_in_8bit', None)
+            model_kwargs.pop('load_in_4bit', None)
 
         if not lora_weights:
             # torch.device context uses twice memory for AutoGPTQ
@@ -3287,6 +3344,7 @@ def get_score_model(score_model: str = None,
         regenerate_gradio_clients = False
         llama_type = False
         max_seq_len = None
+        max_output_seq_len = None
         rope_scaling = {}
         compile_model = False
         llamacpp_path = None
@@ -3311,12 +3369,14 @@ def evaluate_fake(*args, **kwargs):
     return
 
 
+# keep in sync with H2oGPTParams
 def evaluate(
         model_state,
         my_db_state,
         selection_docs_state,
         requests_state,
         roles_state,
+
         # START NOTE: Examples must have same order of parameters
         instruction,
         iinput,
@@ -3471,6 +3531,7 @@ def evaluate(
         pdf_loaders_options0=None,
         url_loaders_options0=None,
         jq_schema0=None,
+        extract_frames0=None,
         keep_sources_in_context=None,
         gradio_errors_to_chatbot=None,
         allow_chat_system_prompt=None,
@@ -3482,6 +3543,8 @@ def evaluate(
         enable_pdf_ocr=None,
         enable_pdf_doctr=None,
         try_pdf_as_html=None,
+
+        load_awq=None,
 ):
     # ensure passed these
     assert concurrency_count is not None
@@ -3510,6 +3573,9 @@ def evaluate(
         url_loaders = url_loaders_options0
     if jq_schema is None:
         jq_schema = jq_schema0
+    if extract_frames is None:
+        extract_frames = extract_frames0
+
     if isinstance(langchain_agents, str):
         if langchain_agents.strip().startswith('['):
             # already list, but as string
@@ -3864,6 +3930,7 @@ def evaluate(
                 regenerate_gradio_clients=regenerate_gradio_clients,
                 model_name=base_model, model=model, tokenizer=tokenizer,
                 langchain_only_model=langchain_only_model,
+                load_awq=load_awq,
                 async_output=async_output,
                 num_async=num_async,
                 prompter=prompter,
@@ -4052,6 +4119,7 @@ def evaluate(
                 openai_client, openai_async_client, \
                     inf_type, _, _, _, _ = set_openai(inference_server, model_name=base_model)
             where_from = inf_type
+            responses = None
 
             terminate_response = prompter.terminate_response or []
             stop_sequences = list(set(terminate_response + [prompter.PreResponse]))
@@ -4066,103 +4134,116 @@ def evaluate(
                                      n=num_return_sequences,
                                      presence_penalty=(repetition_penalty - 1.0) * 2.0 + 0.0,  # so good default
                                      )
-            if inf_type == 'vllm' or inf_type == 'openai':
-                if inf_type == 'vllm':
-                    vllm_extra_dict = get_vllm_extra_dict(tokenizer, stop_sequences=stop_sequences,
-                                                          # repetition_penalty=repetition_penalty,  # could pass
-                                                          )
+            try:
+                if inf_type == 'vllm' or inf_type == 'openai':
+                    if inf_type == 'vllm':
+                        vllm_extra_dict = get_vllm_extra_dict(tokenizer, stop_sequences=stop_sequences,
+                                                              # repetition_penalty=repetition_penalty,  # could pass
+                                                              )
+                        other_dict = dict(timeout=max_time)
+                    else:
+                        vllm_extra_dict = {}
+                        other_dict = dict(timeout=max_time)
+                    responses = openai_client.completions.create(
+                        model=base_model,
+                        prompt=prompt,
+                        **gen_server_kwargs,
+                        stop=stop_sequences,
+                        **vllm_extra_dict,
+                        stream=stream_output,
+                        **other_dict,
+                    )
+                    text = ''
+                    sources = []
+                    response = ''
+                    if not stream_output:
+                        text = responses.choices[0].text
+                        response = prompter.get_response(prompt + text, prompt=prompt,
+                                                         sanitize_bot_response=sanitize_bot_response)
+                    else:
+                        collected_events = []
+                        tgen0 = time.time()
+                        for event in responses:
+                            collected_events.append(event)  # save the event response
+                            delta = event.choices[0].text  # extract the text
+                            text += delta  # append the text
+                            if delta:
+                                response = prompter.get_response(prompt + text, prompt=prompt,
+                                                                 sanitize_bot_response=sanitize_bot_response)
+                                yield dict(response=response, sources=sources, save_dict={}, llm_answers={},
+                                           response_no_refs=response, sources_str='', prompt_raw='')
+                            if time.time() - tgen0 > max_time:
+                                if verbose:
+                                    print("Took too long for OpenAI or VLLM: %s" % (time.time() - tgen0), flush=True)
+                                break
+                            time.sleep(0.01)
+                elif inf_type == 'vllm_chat' or inf_type == 'openai_chat':
                     other_dict = dict(timeout=max_time)
+                    if system_prompt in [None, 'None', 'auto']:
+                        openai_system_prompt = "You are a helpful assistant."
+                    else:
+                        openai_system_prompt = system_prompt
+                    messages0 = []
+                    if openai_system_prompt:
+                        messages0.append({"role": "system", "content": openai_system_prompt})
+                    if chat_conversation and add_chat_history_to_context:
+                        assert external_handle_chat_conversation, "Should be handling only externally"
+                        # history_to_use_final handles token counting issues
+                        for message1 in history_to_use_final:
+                            if len(message1) == 2 and (message1[0] is None or message1[1] is None):
+                                # then not really part of LLM, internal, so avoid
+                                continue
+                            if len(message1) == 2:
+                                if message1[0]:
+                                    messages0.append(
+                                        {'role': 'user', 'content': gradio_to_llm(message1[0], bot=False)})
+                                if message1[1]:
+                                    messages0.append(
+                                        {'role': 'assistant', 'content': gradio_to_llm(message1[1], bot=True)})
+                    if prompt:
+                        messages0.append({'role': 'user', 'content': prompt})
+                    responses = openai_client.chat.completions.create(
+                        model=base_model,
+                        messages=messages0,
+                        stream=stream_output,
+                        **gen_server_kwargs,
+                        **other_dict,
+                    )
+                    text = ""
+                    sources = []
+                    response = ""
+                    if not stream_output:
+                        text = responses.choices[0].message.content
+                        response = prompter.get_response(prompt + text, prompt=prompt,
+                                                         sanitize_bot_response=sanitize_bot_response)
+                    else:
+                        tgen0 = time.time()
+                        for chunk in responses:
+                            delta = chunk.choices[0].delta.content
+                            if delta:
+                                text += delta
+                                response = prompter.get_response(prompt + text, prompt=prompt,
+                                                                 sanitize_bot_response=sanitize_bot_response)
+                                yield dict(response=response, sources=sources, save_dict={}, llm_answers={},
+                                           response_no_refs=response, sources_str='', prompt_raw='')
+                            if time.time() - tgen0 > max_time:
+                                if verbose:
+                                    print("Took too long for OpenAI or VLLM Chat: %s" % (time.time() - tgen0), flush=True)
+                                break
                 else:
-                    vllm_extra_dict = {}
-                    other_dict = dict(timeout=max_time)
-                responses = openai_client.create(
-                    model=base_model,
-                    prompt=prompt,
-                    **gen_server_kwargs,
-                    stop=stop_sequences,
-                    **vllm_extra_dict,
-                    stream=stream_output,
-                    **other_dict,
-                )
-                text = ''
-                sources = []
-                response = ''
-                if not stream_output:
-                    text = responses.choices[0].text
-                    response = prompter.get_response(prompt + text, prompt=prompt,
-                                                     sanitize_bot_response=sanitize_bot_response)
-                else:
-                    collected_events = []
-                    tgen0 = time.time()
-                    for event in responses:
-                        collected_events.append(event)  # save the event response
-                        delta = event.choices[0].text  # extract the text
-                        text += delta  # append the text
-                        if delta:
-                            response = prompter.get_response(prompt + text, prompt=prompt,
-                                                             sanitize_bot_response=sanitize_bot_response)
-                            yield dict(response=response, sources=sources, save_dict={}, llm_answers={},
-                                       response_no_refs=response, sources_str='', prompt_raw='')
-                        if time.time() - tgen0 > max_time:
-                            if verbose:
-                                print("Took too long for OpenAI or VLLM: %s" % (time.time() - tgen0), flush=True)
-                            break
-                        time.sleep(0.01)
-            elif inf_type == 'vllm_chat' or inf_type == 'openai_chat':
-                other_dict = dict(timeout=max_time)
-                if system_prompt in [None, 'None', 'auto']:
-                    openai_system_prompt = "You are a helpful assistant."
-                else:
-                    openai_system_prompt = system_prompt
-                messages0 = []
-                if openai_system_prompt:
-                    messages0.append({"role": "system", "content": openai_system_prompt})
-                if chat_conversation and add_chat_history_to_context:
-                    assert external_handle_chat_conversation, "Should be handling only externally"
-                    # history_to_use_final handles token counting issues
-                    for message1 in history_to_use_final:
-                        if len(message1) == 2 and (message1[0] is None or message1[1] is None):
-                            # then not really part of LLM, internal, so avoid
-                            continue
-                        if len(message1) == 2:
-                            if message1[0]:
-                                messages0.append(
-                                    {'role': 'user', 'content': gradio_to_llm(message1[0], bot=False)})
-                            if message1[1]:
-                                messages0.append(
-                                    {'role': 'assistant', 'content': gradio_to_llm(message1[1], bot=True)})
-                if prompt:
-                    messages0.append({'role': 'user', 'content': prompt})
-                responses = openai_client.create(
-                    model=base_model,
-                    messages=messages0,
-                    stream=stream_output,
-                    **gen_server_kwargs,
-                    **other_dict,
-                )
-                text = ""
-                sources = []
-                response = ""
-                if not stream_output:
-                    text = responses.choices[0].message.content
-                    response = prompter.get_response(prompt + text, prompt=prompt,
-                                                     sanitize_bot_response=sanitize_bot_response)
-                else:
-                    tgen0 = time.time()
-                    for chunk in responses:
-                        delta = chunk.choices[0].delta.content
-                        if delta:
-                            text += delta
-                            response = prompter.get_response(prompt + text, prompt=prompt,
-                                                             sanitize_bot_response=sanitize_bot_response)
-                            yield dict(response=response, sources=sources, save_dict={}, llm_answers={},
-                                       response_no_refs=response, sources_str='', prompt_raw='')
-                        if time.time() - tgen0 > max_time:
-                            if verbose:
-                                print("Took too long for OpenAI or VLLM Chat: %s" % (time.time() - tgen0), flush=True)
-                            break
-            else:
-                raise RuntimeError("No such OpenAI mode: %s" % inference_server)
+                    raise RuntimeError("No such OpenAI mode: %s" % inference_server)
+            finally:
+                if responses is not None:
+                    try:
+                        responses.close()
+                    except Exception as e:
+                        print("Failed to close OpenAI response: %s" % str(e), flush=True)
+                if regenerate_clients and openai_client is not None:
+                    try:
+                        openai_client.close()
+                    except Exception as e:
+                        print("Failed to close OpenAI client: %s" % str(e), flush=True)
+
         elif inference_server.startswith('http') and is_vision_model(base_model):
             where_from = "gr_client for llava"
             sources = []

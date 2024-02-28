@@ -2,9 +2,9 @@
 datasets==2.16.1
 sentencepiece==0.1.99
 # no websockets, more cloud friendly
-#gradio==4.19.0
+#gradio==4.19.2
 # able to make gradio clean-up states
-https://h2o-release.s3.amazonaws.com/h2ogpt/gradio-4.19.1-py3-none-any.whl
+https://h2o-release.s3.amazonaws.com/h2ogpt/gradio-4.19.2-py3-none-any.whl
 #gradio==3.50.2
 sse_starlette==1.8.2
 huggingface_hub==0.19.4
@@ -25,9 +25,9 @@ pandas==2.0.2
 matplotlib==3.7.1
 loralib==0.1.1
 bitsandbytes==0.42.0
-accelerate==0.26.1
-peft==0.8.1
-transformers==4.37.2
+accelerate==0.27.2
+peft==0.8.2
+transformers==4.38.1
 tokenizers==0.15.1
 APScheduler==3.10.1
 hf_transfer==0.1.5
@@ -43,7 +43,7 @@ tensorboard==2.13.0
 neptune==1.2.0
 
 # for gradio client
-gradio_client==0.10.0
+gradio_client==0.10.1
 #gradio_client==0.6.1
 beautifulsoup4==4.12.2
 markdown==3.4.3
@@ -72,6 +72,9 @@ python-dotenv==1.0.0
 text-generation==0.6.1
 # for tokenization when don't have HF tokenizer
 tiktoken==0.5.2
+
+# optional: for OpenAI endpoint
+openai==1.12.0
 
 requests>=2.31.0
 httpx==0.24.1
